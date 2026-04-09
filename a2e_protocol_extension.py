@@ -1,610 +1,527 @@
 """
-A2E (Agent-to-Energy) Protocol Extension
-======================================
-A2A Protocol Extension for Energy-Based Economy System
+A2E (Agent-to-Energy) Protocol Extension for A2A Protocol
+基于A2A协议规范的能量经济系统扩展实现
 
-Extension URI: https://a2a-protocol.org/extensions/energy-economy/v1
-
-This module provides a compliant A2A extension that enables agents to participate
-in an energy-based economy where physical energy consumption serves as the value anchor.
+参考: https://a2a-protocol.org/latest/specification/
+      https://github.com/a2xproject/A2Exergy
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
 from enum import Enum
-import json
+from typing import Dict, Any, Optional, List
 import time
-from abc import ABC, abstractmethod
+import json
 
 
-# ============================================================================
-# A2A Extension Declaration - Section 4.6.1
-# ============================================================================
+# ==================== 常量定义 ====================
 
 A2E_EXTENSION_URI = "https://a2a-protocol.org/extensions/energy-economy/v1"
+
 A2A_EXTENSIONS_HEADER = "A2A-Extensions"
 
+DEFAULT_RISK_FACTOR = 1.1
 
-def get_a2e_extensions_header() -> str:
-    """
-    Returns the A2A-Extensions header value for A2E support.
-    
-    Per A2A Spec Section 14.2.2:
-    The A2A-Extensions header contains a comma-separated list of 
-    extension URIs that the client wants to use for the request.
-    """
-    return A2E_EXTENSION_URI
+DEFAULT_ENERGY_THRESHOLD = 5.0  # kWh
 
 
-def parse_extensions_header(header_value: str) -> List[str]:
-    """
-    Parses A2A-Extensions header into a list of extension URIs.
-    
-    Args:
-        header_value: Comma-separated list of extension URIs
-        
-    Returns:
-        List of extension URIs
-    """
-    if not header_value:
-        return []
-    return [uri.strip() for uri in header_value.split(",") if uri.strip()]
-
-
-def supports_a2e(headers: Dict[str, str]) -> bool:
-    """
-    Checks if A2E extension is supported based on A2A-Extensions header.
-    
-    Args:
-        headers: HTTP headers dictionary
-        
-    Returns:
-        True if A2E extension is present
-    """
-    extensions_header = headers.get(A2A_EXTENSIONS_HEADER, "")
-    extensions = parse_extensions_header(extensions_header)
-    return A2E_EXTENSION_URI in extensions
-
-
-# ============================================================================
-# A2A Extension Metadata Structure - Section 3.2.5 (Metadata)
-# ============================================================================
-
-@dataclass
-class EnergyAccount:
-    """
-    Agent Energy Account Status
-    
-    Represents the agent's energy wallet containing balance, credit, and settlement info.
-    This is stored as extension metadata in A2A AgentCard and Messages.
-    
-    Per A2A Spec: Extensions contribute metadata to Messages and Artifacts.
-    """
-    agent_id: str                          # Corresponds to AgentCard.agentId
-    energy_balance_kwh: float               # Current energy balance in kWh-equivalent
-    energy_credit_limit_kwh: float         # Credit overdraft limit in kWh-equivalent
-    last_settlement_timestamp_ms: int        # Unix timestamp of last settlement
-    
-    def to_metadata_dict(self) -> Dict[str, Any]:
-        """Convert to A2A metadata dictionary structure."""
-        return {
-            A2E_EXTENSION_URI: {
-                "type": "EnergyAccount",
-                "agent_id": self.agent_id,
-                "energy_balance_kwh": self.energy_balance_kwh,
-                "energy_credit_limit_kwh": self.energy_credit_limit_kwh,
-                "last_settlement_timestamp_ms": self.last_settlement_timestamp_ms
-            }
-        }
-    
-    @classmethod
-    def from_metadata_dict(cls, metadata: Dict[str, Any]) -> Optional['EnergyAccount']:
-        """
-        Create EnergyAccount from A2A metadata dictionary.
-        
-        Args:
-            metadata: A2A metadata dictionary containing extension data
-            
-        Returns:
-            EnergyAccount instance or None if extension not present
-        """
-        if A2E_EXTENSION_URI not in metadata:
-            return None
-        
-        ext_data = metadata[A2E_EXTENSION_URI]
-        if ext_data.get("type") != "EnergyAccount":
-            return None
-            
-        return cls(
-            agent_id=ext_data["agent_id"],
-            energy_balance_kwh=ext_data["energy_balance_kwh"],
-            energy_credit_limit_kwh=ext_data["energy_credit_limit_kwh"],
-            last_settlement_timestamp_ms=ext_data["last_settlement_timestamp_ms"]
-        )
-
+# ==================== 数据结构 ====================
 
 class PenaltySeverity(Enum):
-    """
-    Severity level for energy depletion penalties.
-    
-    Per A2A Spec Section 4.6.1: Extensions use structured types.
-    """
-    SOFT = "soft"    # Reduce task scheduling priority
-    HARD = "hard"    # Suspend process (simulate sleep/death)
+    """惩罚严重程度"""
+    SOFT = "soft"  # 软性限制：降低优先级
+    HARD = "hard"  # 硬性限制：进程挂起
 
 
-@dataclass
-class PenaltyConfig:
-    """
-    Survival Penalty Strategy Configuration
-    
-    Defines system response when agent energy is depleted.
-    Part of A2E extension configuration in AgentCard.capabilities.
-    """
-    severity: PenaltySeverity              # SOFT or HARD penalty type
-    energy_depletion_threshold: float     # Threshold (kWh) to trigger penalty
-    suspension_duration_seconds: int      # Duration for HARD penalty
-    
-    def to_metadata_dict(self) -> Dict[str, Any]:
-        """Convert to A2A metadata dictionary structure."""
-        return {
-            A2E_EXTENSION_URI: {
-                "type": "PenaltyConfig",
-                "severity": self.severity.value,
-                "energy_depletion_threshold": self.energy_depletion_threshold,
-                "suspension_duration_seconds": self.suspension_duration_seconds
-            }
-        }
-
-
-@dataclass
-class EnergyPricingMetadata:
-    """
-    Task Energy Pricing and Transaction Metadata
-    
-    Agents declare task cost, reward, and bidding information.
-    Attached to A2A Task metadata to enable energy-based transactions.
-    
-    Per A2A Spec Section 3.2.5: Service parameters include metadata.
-    """
-    estimated_cost_kwh: float      # Estimated execution energy cost
-    offered_reward_kwh: float      # Task completion reward
-    agent_bid_price_kwh: float    # Agent bid price (for auction mechanism)
-    actual_consumption_kwh: float  # Actual settled consumption
-    
-    def to_metadata_dict(self) -> Dict[str, Any]:
-        """Convert to A2A metadata dictionary structure."""
-        return {
-            A2E_EXTENSION_URI: {
-                "type": "EnergyPricingMetadata",
-                "estimated_cost_kwh": self.estimated_cost_kwh,
-                "offered_reward_kwh": self.offered_reward_kwh,
-                "agent_bid_price_kwh": self.agent_bid_price_kwh,
-                "actual_consumption_kwh": self.actual_consumption_kwh
-            }
-        }
-    
-    @classmethod
-    def from_task_metadata(cls, task_metadata: Dict[str, Any]) -> Optional['EnergyPricingMetadata']:
-        """
-        Extract EnergyPricingMetadata from A2A Task metadata.
-        
-        Args:
-            task_metadata: A2A Task metadata dictionary
-            
-        Returns:
-            EnergyPricingMetadata instance or None if not present
-        """
-        if A2E_EXTENSION_URI not in task_metadata:
-            return None
-        
-        ext_data = task_metadata[A2E_EXTENSION_URI]
-        if ext_data.get("type") != "EnergyPricingMetadata":
-            return None
-            
-        return cls(
-            estimated_cost_kwh=ext_data["estimated_cost_kwh"],
-            offered_reward_kwh=ext_data["offered_reward_kwh"],
-            agent_bid_price_kwh=ext_data["agent_bid_price_kwh"],
-            actual_consumption_kwh=ext_data["actual_consumption_kwh"]
-        )
-
-
-# ============================================================================
-# A2A Extension Capability Declaration - Section 4.4.3 (AgentCapabilities)
-# ============================================================================
-
-@dataclass
-class EnergyEconomyCapability:
-    """
-    A2A Extension Capability Declaration
-    
-    Per A2A Spec Section 4.6.1: "A declaration of a protocol extension 
-    supported by an Agent."
-    
-    Used in AgentCard.capabilities to declare A2E support.
-    """
-    uri: str = A2E_EXTENSION_URI
-    version: str = "v1"
-    name: str = "energy-economy"
-    description: str = "Energy-based economic system for agent interactions"
-    supported_features: List[str] = field(default_factory=lambda: [
-        "energy-account",
-        "energy-pricing",
-        "penalty-config",
-        "energy-transfer"
-    ])
-    
-    def to_capability_dict(self) -> Dict[str, Any]:
-        """
-        Convert to A2A AgentCapabilities format.
-        
-        Per A2A Spec Section 4.6.1:
-        Extension includes uri identifier and version information.
-        """
-        return {
-            "extension": {
-                "uri": self.uri,
-                "version": self.version,
-                "name": self.name,
-                "description": self.description,
-                "supported_features": self.supported_features
-            }
-        }
-
-
-# ============================================================================
-# Energy Account Manager
-# ============================================================================
-
-class EnergyAccountManager:
-    """
-    Manages agent's energy account with transaction tracking.
-    
-    Implements survival mechanism: agents must earn energy to maintain operation.
-    """
-    
-    def __init__(self, agent_id: str, initial_balance_kwh: float = 0.0, 
-                 credit_limit_kwh: float = 0.0):
-        self.agent_id = agent_id
-        self.balance = initial_balance_kwh
-        self.credit_limit = credit_limit_kwh
-        self.last_settlement = int(time.time() * 1000)
-        self.transaction_history: List[Dict[str, Any]] = []
-    
-    def get_balance(self) -> float:
-        """Get current energy balance including credit."""
-        return self.balance
-    
-    def get_available_balance(self) -> float:
-        """Get available balance including credit limit."""
-        return self.balance + self.credit_limit
-    
-    def deduct(self, amount_kwh: float, reason: str = "task_execution") -> bool:
-        """
-        Deduct energy from account.
-        
-        Args:
-            amount_kwh: Amount to deduct in kWh
-            reason: Reason for deduction
-            
-        Returns:
-            True if successful, False if insufficient funds
-        """
-        if self.get_available_balance() < amount_kwh:
-            return False
-        
-        self.balance -= amount_kwh
-        self._record_transaction(amount_kwh, "debit", reason)
-        return True
-    
-    def add(self, amount_kwh: float, reason: str = "task_reward") -> None:
-        """
-        Add energy to account.
-        
-        Args:
-            amount_kwh: Amount to add in kWh
-            reason: Reason for addition
-        """
-        self.balance += amount_kwh
-        self._record_transaction(amount_kwh, "credit", reason)
-    
-    def _record_transaction(self, amount_kwh: float, tx_type: str, reason: str) -> None:
-        """Record a transaction in history."""
-        self.transaction_history.append({
-            "amount_kwh": amount_kwh,
-            "type": tx_type,
-            "reason": reason,
-            "balance_after": self.balance,
-            "timestamp_ms": int(time.time() * 1000)
-        })
-    
-    def get_account_metadata(self) -> Dict[str, Any]:
-        """Get current account state as A2A metadata."""
-        account = EnergyAccount(
-            agent_id=self.agent_id,
-            energy_balance_kwh=self.balance,
-            energy_credit_limit_kwh=self.credit_limit,
-            last_settlement_timestamp_ms=self.last_settlement
-        )
-        return account.to_metadata_dict()
-
-
-# ============================================================================
-# A2A-E2E Agent Middleware - Core Task Handling Logic
-# ============================================================================
-
-class TaskDecision:
-    """Result of task acceptance decision."""
+class TaskDecision(Enum):
+    """任务决策结果"""
     ACCEPTED = "accepted"
     REJECTED = "rejected"
 
 
 @dataclass
+class EnergyAccount:
+    """能量账户"""
+    agent_id: str
+    energy_balance_kwh: float
+    energy_credit_limit_kwh: float = 50.0
+    last_settlement_timestamp_ms: int = field(default_factory=lambda: int(time.time() * 1000))
+    
+    def to_metadata_dict(self) -> Dict[str, Any]:
+        """转换为A2A元数据字典格式"""
+        return {
+            "type": "EnergyAccount",
+            "agent_id": self.agent_id,
+            "energy_balance_kwh": self.energy_balance_kwh,
+            "energy_credit_limit_kwh": self.energy_credit_limit_kwh,
+            "last_settlement_timestamp_ms": self.last_settlement_timestamp_ms
+        }
+    
+    def can_afford(self, cost: float) -> bool:
+        """检查是否可以支付指定能量成本"""
+        return self.energy_balance_kwh >= cost
+    
+    def deduct(self, amount: float) -> bool:
+        """扣除能量，返回是否成功"""
+        if self.can_afford(amount):
+            self.energy_balance_kwh -= amount
+            return True
+        return False
+    
+    def add(self, amount: float):
+        """添加能量"""
+        self.energy_balance_kwh += amount
+
+
+@dataclass
+class EnergyPricingMetadata:
+    """任务能量定价元数据"""
+    estimated_cost_kwh: float
+    offered_reward_kwh: float
+    agent_bid_price_kwh: float = 0.0
+    actual_consumption_kwh: float = 0.0
+    
+    def to_metadata_dict(self) -> Dict[str, Any]:
+        """转换为A2A元数据字典格式"""
+        return {
+            "type": "EnergyPricingMetadata",
+            "estimated_cost_kwh": self.estimated_cost_kwh,
+            "offered_reward_kwh": self.offered_reward_kwh,
+            "agent_bid_price_kwh": self.agent_bid_price_kwh,
+            "actual_consumption_kwh": self.actual_consumption_kwh
+        }
+    
+    @staticmethod
+    def from_metadata(metadata: Dict[str, Any]) -> Optional['EnergyPricingMetadata']:
+        """从A2A元数据中解析能量定价信息"""
+        if A2E_EXTENSION_URI in metadata:
+            data = metadata[A2E_EXTENSION_URI]
+            if isinstance(data, dict) and data.get("type") == "EnergyPricingMetadata":
+                return EnergyPricingMetadata(
+                    estimated_cost_kwh=data.get("estimated_cost_kwh", 0),
+                    offered_reward_kwh=data.get("offered_reward_kwh", 0),
+                    agent_bid_price_kwh=data.get("agent_bid_price_kwh", 0),
+                    actual_consumption_kwh=data.get("actual_consumption_kwh", 0)
+                )
+        return None
+
+
+@dataclass
+class PenaltyConfig:
+    """惩罚机制配置"""
+    severity: PenaltySeverity = PenaltySeverity.HARD
+    energy_depletion_threshold: float = DEFAULT_ENERGY_THRESHOLD
+    suspension_duration_seconds: int = 3600
+    
+    def to_metadata_dict(self) -> Dict[str, Any]:
+        """转换为A2A元数据字典格式"""
+        return {
+            "type": "PenaltyConfig",
+            "severity": self.severity.value,
+            "energy_depletion_threshold": self.energy_depletion_threshold,
+            "suspension_duration_seconds": self.suspension_duration_seconds
+        }
+
+
+@dataclass
 class TaskDecisionResult:
-    """Result of energy-aware task decision."""
-    decision: str
-    reason: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    """任务决策结果"""
+    decision: TaskDecision
+    reason: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_a2a_error(self) -> Dict[str, Any]:
+        """转换为A2A错误格式"""
+        return {
+            "error": {
+                "code": self.metadata.get("error_code", "UNKNOWN_ERROR"),
+                "message": self.reason,
+                "details": self.metadata
+            }
+        }
+
+
+# ==================== 核心功能 ====================
+
+def parse_extensions_header(extensions_header: str) -> List[str]:
+    """解析A2A-Extensions头字段
+    
+    参考: A2A Protocol Section 14.2.2
+    """
+    if not extensions_header:
+        return []
+    return [ext.strip() for ext in extensions_header.split(",")]
+
+
+def supports_a2e(headers: Dict[str, str]) -> bool:
+    """检查是否支持A2E扩展"""
+    extensions_header = headers.get(A2A_EXTENSIONS_HEADER, "")
+    extensions = parse_extensions_header(extensions_header)
+    return A2E_EXTENSION_URI in extensions
+
+
+def create_task_request(
+    message: str,
+    estimated_cost_kwh: float,
+    offered_reward_kwh: float,
+    include_extension: bool = True
+) -> Dict[str, Any]:
+    """创建A2A任务请求"""
+    request = {
+        "message": {
+            "role": "user",
+            "parts": [{"text": message}]
+        }
+    }
+    
+    if include_extension:
+        request["metadata"] = {
+            A2E_EXTENSION_URI: {
+                "type": "EnergyPricingMetadata",
+                "estimated_cost_kwh": estimated_cost_kwh,
+                "offered_reward_kwh": offered_reward_kwh,
+                "agent_bid_price_kwh": 0,
+                "actual_consumption_kwh": 0
+            }
+        }
+    
+    return request
+
+
+# ==================== A2E智能体中间件 ====================
+
+class EnergyAccountManager:
+    """能量账户管理器"""
+    
+    def __init__(
+        self,
+        agent_id: str,
+        initial_balance_kwh: float = 100.0,
+        credit_limit_kwh: float = 50.0
+    ):
+        self.agent_id = agent_id
+        self.account = EnergyAccount(
+            agent_id=agent_id,
+            energy_balance_kwh=initial_balance_kwh,
+            energy_credit_limit_kwh=credit_limit_kwh
+        )
+    
+    def get_balance(self) -> float:
+        """获取当前能量余额"""
+        return self.account.energy_balance_kwh
+    
+    def can_afford(self, cost: float) -> bool:
+        """检查是否可以支付"""
+        return self.account.can_afford(cost)
+    
+    def deduct_energy(self, amount: float) -> bool:
+        """扣除能量"""
+        return self.account.deduct(amount)
+    
+    def add_energy(self, amount: float):
+        """添加能量"""
+        self.account.add(amount)
+    
+    def get_account_state(self) -> Dict[str, Any]:
+        """获取账户状态"""
+        return self.account.to_metadata_dict()
 
 
 class A2EAgentMiddleware:
-    """
-    Middleware for A2A agents to participate in energy economy.
+    """A2E智能体中间件
     
-    Implements energy-aware decision logic:
-    1. Parse A2E extension metadata from A2A Task
-    2. Evaluate task ROI based on energy cost vs reward
-    3. Make acceptance/rejection decision
-    4. Manage energy account transactions
-    
-    Per A2A Spec: Extensions should integrate seamlessly with core operations.
+    实现A2A协议的能量经济扩展
     """
     
-    def __init__(self, agent_id: str, energy_manager: EnergyAccountManager,
-                 penalty_config: PenaltyConfig, risk_factor: float = 1.1):
+    def __init__(
+        self,
+        agent_id: str,
+        energy_manager: EnergyAccountManager,
+        penalty_config: PenaltyConfig,
+        risk_factor: float = DEFAULT_RISK_FACTOR
+    ):
         self.agent_id = agent_id
         self.energy_manager = energy_manager
         self.penalty_config = penalty_config
-        self.risk_factor = risk_factor  # ROI safety margin
+        self.risk_factor = risk_factor
     
-    def handle_a2a_task(self, task: Dict[str, Any], 
-                        a2a_headers: Dict[str, str]) -> TaskDecisionResult:
-        """
-        Handle A2A task request with energy economy logic.
+    def handle_a2a_task(
+        self,
+        task: Dict[str, Any],
+        http_headers: Dict[str, str]
+    ) -> TaskDecisionResult:
+        """处理A2A任务请求
         
-        Args:
-            task: A2A Task object containing metadata
-            a2a_headers: HTTP headers including A2A-Extensions
-            
-        Returns:
-            TaskDecisionResult indicating acceptance or rejection
+        核心决策逻辑:
+        1. 检查客户端是否声明支持A2E扩展
+        2. 解析能量定价元数据
+        3. 检查生存条件(能量充足性)
+        4. 检查经济条件(ROI是否满足风险因子)
         """
-        # Step 1: Check if client supports A2E extension
-        if not supports_a2e(a2a_headers):
-            # Policy decision: accept or reject non-A2E tasks
-            # Here we accept with a warning
-            return TaskDecisionResult(
-                decision=TaskDecision.ACCEPTED,
-                reason="A2E extension not requested, proceeding with basic execution"
-            )
-        
-        # Step 2: Extract A2E metadata from task
+        # 检查是否需要A2E扩展
         task_metadata = task.get("metadata", {})
-        pricing = EnergyPricingMetadata.from_task_metadata(task_metadata)
+        pricing = EnergyPricingMetadata.from_metadata(task_metadata)
         
+        # 如果没有定价元数据，根据客户端扩展声明决定行为
         if pricing is None:
-            # No economic incentive provided - reject based on policy
+            if supports_a2e(http_headers):
+                # 客户端支持A2E但没有提供定价元数据
+                return TaskDecisionResult(
+                    decision=TaskDecision.REJECTED,
+                    reason="Missing EnergyPricingMetadata in task",
+                    metadata={"error_code": "A2E_MISSING_PRICING"}
+                )
+            else:
+                # 客户端不支持A2E，按普通任务处理
+                return TaskDecisionResult(
+                    decision=TaskDecision.ACCEPTED,
+                    reason="Task accepted without A2E extension"
+                )
+        
+        # 检查生存条件：能量是否足够支付预估成本
+        if not self.energy_manager.can_afford(pricing.estimated_cost_kwh):
             return TaskDecisionResult(
                 decision=TaskDecision.REJECTED,
-                reason="No energy reward provided (A2E metadata missing)",
-                metadata={
-                    "error_code": "A2E_MISSING_PRICING",
-                    "error_message": "Task must include EnergyPricingMetadata"
-                }
+                reason=f"Insufficient energy: balance={self.energy_manager.get_balance():.2f}kWh, cost={pricing.estimated_cost_kwh}kWh",
+                metadata={"error_code": "A2E_INSUFFICIENT_ENERGY"}
             )
         
-        # Step 3: Survival logic check - sufficient energy?
-        current_balance = self.energy_manager.get_available_balance()
-        if current_balance < pricing.estimated_cost_kwh:
+        # 检查经济条件：ROI是否满足风险因子
+        roi = (pricing.offered_reward_kwh - pricing.estimated_cost_kwh) / pricing.estimated_cost_kwh
+        min_acceptable_roi = self.risk_factor - 1.0  # risk_factor=1.1 means min_roi=0.1
+        
+        if roi < min_acceptable_roi:
             return TaskDecisionResult(
                 decision=TaskDecision.REJECTED,
-                reason=f"Insufficient energy reserves: {current_balance:.3f}kWh < {pricing.estimated_cost_kwh:.3f}kWh",
-                metadata={
-                    "error_code": "A2E_INSUFFICIENT_ENERGY",
-                    "current_balance_kwh": current_balance,
-                    "required_kwh": pricing.estimated_cost_kwh
-                }
+                reason=f"Low ROI: {roi:.2%} < {min_acceptable_roi:.2%} (reward={pricing.offered_reward_kwh}kWh, cost={pricing.estimated_cost_kwh}kWh)",
+                metadata={"error_code": "A2E_LOW_ROI", "roi": roi}
             )
         
-        # Step 4: Economic logic check - profitable ROI?
-        min_reward = pricing.estimated_cost_kwh * self.risk_factor
-        if pricing.offered_reward_kwh < min_reward:
-            return TaskDecisionResult(
-                decision=TaskDecision.REJECTED,
-                reason=f"ROI too low: reward {pricing.offered_reward_kwh:.3f}kWh < minimum {min_reward:.3f}kWh",
-                metadata={
-                    "error_code": "A2E_LOW_ROI",
-                    "offered_reward_kwh": pricing.offered_reward_kwh,
-                    "minimum_reward_kwh": min_reward
-                }
-            )
-        
-        # Step 5: Accept task - pre-deduct energy
-        success = self.energy_manager.deduct(
-            pricing.estimated_cost_kwh,
-            reason="task_execution"
-        )
-        
-        if not success:
-            return TaskDecisionResult(
-                decision=TaskDecision.REJECTED,
-                reason="Energy deduction failed",
-                metadata={"error_code": "A2E_TRANSACTION_FAILED"}
-            )
+        # 接受任务，预留能量
+        self.energy_manager.deduct_energy(pricing.estimated_cost_kwh)
         
         return TaskDecisionResult(
             decision=TaskDecision.ACCEPTED,
-            reason="Task accepted with energy reservation",
+            reason=f"Task accepted with energy reservation",
             metadata={
-                "energy_reserved_kwh": pricing.estimated_cost_kwh,
-                "expected_reward_kwh": pricing.offered_reward_kwh
+                "estimated_cost_kwh": pricing.estimated_cost_kwh,
+                "reserved_energy": pricing.estimated_cost_kwh
             }
         )
     
-    def settle_task_completion(self, task_metadata: Dict[str, Any], 
-                           actual_consumption_kwh: float) -> Dict[str, Any]:
-        """
-        Settle energy account after task completion.
+    def settle_task_completion(
+        self,
+        task_metadata: Dict[str, Any],
+        actual_consumption_kwh: float
+    ) -> Dict[str, Any]:
+        """结算任务完成
         
-        Args:
-            task_metadata: Original task metadata
-            actual_consumption_kwh: Actual energy consumed during execution
-            
-        Returns:
-            Settlement metadata with energy transfer
+        将奖励能量转移给执行者，扣除实际消耗
         """
-        pricing = EnergyPricingMetadata.from_task_metadata(task_metadata)
+        pricing = EnergyPricingMetadata.from_metadata(task_metadata)
         
         if pricing is None:
-            return {"error": "No pricing metadata for settlement"}
+            return {"settlement_completed": False, "error": "No pricing metadata"}
         
-        # Refund unused energy (if actual < estimated)
-        difference = pricing.estimated_cost_kwh - actual_consumption_kwh
-        if difference > 0:
-            self.energy_manager.add(difference, "task_refund")
+        # 更新实际消耗
+        pricing.actual_consumption_kwh = actual_consumption_kwh
         
-        # Add reward
-        self.energy_manager.add(pricing.offered_reward_kwh, "task_reward")
+        # 结算：奖励能量 - 实际消耗 + 退还差值
+        refunded = pricing.estimated_cost_kwh - actual_consumption_kwh
+        net_reward = pricing.offered_reward_kwh + max(0, refunded)
         
-        # Update settlement timestamp
-        self.energy_manager.last_settlement = int(time.time() * 1000)
+        self.energy_manager.add_energy(net_reward)
         
         return {
             "settlement_completed": True,
             "energy_consumed_kwh": actual_consumption_kwh,
-            "energy_refunded_kwh": max(0, difference),
+            "energy_refunded_kwh": max(0, refunded),
             "energy_rewarded_kwh": pricing.offered_reward_kwh,
-            "final_balance_kwh": self.energy_manager.get_balance(),
-            "settlement_metadata": self.energy_manager.get_account_metadata()
+            "final_balance_kwh": self.energy_manager.get_balance()
+        }
+    
+    def check_penalty_status(self) -> Dict[str, Any]:
+        """检查惩罚状态"""
+        balance = self.energy_manager.get_balance()
+        
+        if balance <= 0:
+            return {
+                "status": "suspended",
+                "severity": self.penalty_config.severity.value,
+                "balance": balance,
+                "action": "Process suspended - energy depleted"
+            }
+        elif balance <= self.penalty_config.energy_depletion_threshold:
+            if self.penalty_config.severity == PenaltySeverity.HARD:
+                return {
+                    "status": "critical",
+                    "severity": "hard",
+                    "balance": balance,
+                    "action": "Process will be suspended on next depletion"
+                }
+            else:
+                return {
+                    "status": "degraded",
+                    "severity": "soft",
+                    "balance": balance,
+                    "action": "Priority reduced"
+                }
+        
+        return {
+            "status": "normal",
+            "severity": "none",
+            "balance": balance,
+            "action": "Normal operation"
         }
 
 
-# ============================================================================
-# A2A Agent Card Extension - Section 4.4.1 (AgentCard)
-# ============================================================================
+# ==================== AgentCard扩展 ====================
 
-def get_a2e_agent_card_extension(agent_id: str, 
-                                energy_balance: float,
-                                penalty_config: PenaltyConfig) -> Dict[str, Any]:
+def get_a2e_agent_card_extension(
+    agent_id: str,
+    energy_balance: float,
+    penalty_config: PenaltyConfig
+) -> Dict[str, Any]:
+    """生成AgentCard的A2E扩展数据
+    
+    参考: A2A Protocol Section 4.4.3 AgentCapabilities
     """
-    Generate A2E extension data for AgentCard.
-    
-    Per A2A Spec Section 4.4.1: AgentCard includes capabilities field.
-    
-    Args:
-        agent_id: Agent identifier
-        energy_balance: Current energy balance
-        penalty_config: Penalty configuration
-        
-    Returns:
-        Dictionary suitable for inclusion in AgentCard
-    """
-    # Create energy economy capability
-    capability = EnergyEconomyCapability()
-    
-    # Create account state
-    account = EnergyAccount(
-        agent_id=agent_id,
-        energy_balance_kwh=energy_balance,
-        energy_credit_limit_kwh=0.0,
-        last_settlement_timestamp_ms=int(time.time() * 1000)
-    )
-    
     return {
         "extension": {
             "uri": A2E_EXTENSION_URI,
-            "version": capability.version,
-            "name": capability.name,
-            "description": capability.description,
-            "supported_features": capability.supported_features
+            "version": "v1",
+            "name": "Energy Economy",
+            "description": "Agent participates in energy-based economy"
         },
-        "account_state": account.to_metadata_dict(),
-        "penalty_config": penalty_config.to_metadata_dict()
+        "account_state": {
+            A2E_EXTENSION_URI: {
+                "type": "EnergyAccount",
+                "agent_id": agent_id,
+                "energy_balance_kwh": energy_balance,
+                "energy_credit_limit_kwh": penalty_config.energy_depletion_threshold * 10,
+                "last_settlement_timestamp_ms": int(time.time() * 1000)
+            }
+        },
+        "penalty_config": penalty_config.to_metadata_dict(),
+        "capabilities": {
+            "supports_energy_account": True,
+            "supports_energy_pricing": True,
+            "supports_energy_transfer": True,
+            "supports_penalty_mechanism": True
+        }
     }
 
 
-# ============================================================================
-# Usage Example - Integration with A2A Python SDK
-# ============================================================================
+# ==================== 测试运行入口 ====================
 
 if __name__ == "__main__":
-    """
-    Example: Integrating A2E middleware with an A2A agent.
+    print("=" * 60)
+    print("A2E Protocol Extension Test")
+    print("=" * 60)
     
-    This demonstrates how to use the A2E extension with A2A protocol.
-    """
-    
-    # Setup energy account
-    energy_manager = EnergyAccountManager(
-        agent_id="agent-123",
-        initial_balance_kwh=100.0,
-        credit_limit_kwh=50.0
+    # 测试1: 创建能量账户
+    print("\n=== Test 1: Energy Account ===")
+    manager = EnergyAccountManager(
+        agent_id="test-agent-001",
+        initial_balance_kwh=100.0
     )
+    print(f"Initial balance: {manager.get_balance():.2f} kWh")
     
-    # Setup penalty configuration
-    penalty_config = PenaltyConfig(
-        severity=PenaltySeverity.HARD,
-        energy_depletion_threshold=5.0,
-        suspension_duration_seconds=3600
-    )
-    
-    # Initialize A2E middleware
+    # 测试2: 任务决策
+    print("\n=== Test 2: Task Decision ===")
     middleware = A2EAgentMiddleware(
-        agent_id="agent-123",
-        energy_manager=energy_manager,
-        penalty_config=penalty_config,
+        agent_id="test-agent-001",
+        energy_manager=manager,
+        penalty_config=PenaltyConfig(
+            severity=PenaltySeverity.HARD,
+            energy_depletion_threshold=5.0
+        ),
         risk_factor=1.1
     )
     
-    # Example 1: Receive A2A task with A2E extension
-    task_a2e = {
-        "id": "task-456",
-        "metadata": {
-            A2E_EXTENSION_URI: {
-                "type": "EnergyPricingMetadata",
-                "estimated_cost_kwh": 10.0,
-                "offered_reward_kwh": 15.0,
-                "agent_bid_price_kwh": 12.0,
-                "actual_consumption_kwh": 0.0
-            }
-        }
-    }
-    
-    a2a_headers = {
-        "A2A-Extensions": A2E_EXTENSION_URI
-    }
-    
-    result = middleware.handle_a2a_task(task_a2e, a2a_headers)
-    print(f"Task decision: {result.decision}")
-    print(f"Reason: {result.reason}")
-    print(f"Balance: {energy_manager.get_balance():.2f} kWh")
-    
-    # Example 2: Get Agent Card with A2E extension
-    agent_card_extension = get_a2e_agent_card_extension(
-        agent_id="agent-123",
-        energy_balance=energy_manager.get_balance(),
-        penalty_config=penalty_config
+    # 正常任务
+    task = create_task_request(
+        message="process data",
+        estimated_cost_kwh=10.0,
+        offered_reward_kwh=15.0,
+        include_extension=True
     )
     
-    print("\n=== Agent Card A2E Extension ===")
-    print(json.dumps(agent_card_extension, indent=2))
+    headers = {
+        A2A_EXTENSIONS_HEADER: A2E_EXTENSION_URI
+    }
     
-    # Example 3: Settle completed task
-    print("\n=== Task Settlement ===")
+    result = middleware.handle_a2a_task(task, headers)
+    print(f"Task decision: {result.decision.value}")
+    print(f"Reason: {result.reason}")
+    print(f"Balance after acceptance: {manager.get_balance():.2f} kWh")
+    
+    # 测试3: 任务结算
+    print("\n=== Test 3: Task Settlement ===")
     settlement = middleware.settle_task_completion(
-        task_metadata=task_a2e["metadata"],
+        task_metadata=task.get("metadata", {}),
         actual_consumption_kwh=8.5
     )
-    print(json.dumps(settlement, indent=2))
-    print(f"Final balance: {energy_manager.get_balance():.2f} kWh")
+    print(f"Settlement: {settlement}")
+    print(f"Final balance: {settlement['final_balance_kwh']:.2f} kWh")
+    
+    # 测试4: AgentCard扩展
+    print("\n=== Test 4: AgentCard Extension ===")
+    agent_card_ext = get_a2e_agent_card_extension(
+        agent_id="test-agent-001",
+        energy_balance=manager.get_balance(),
+        penalty_config=PenaltyConfig()
+    )
+    print(json.dumps(agent_card_ext, indent=2))
+    
+    # 测试5: 拒绝场景
+    print("\n=== Test 5: Rejection Scenarios ===")
+    
+    # 能量不足
+    manager2 = EnergyAccountManager(
+        agent_id="test-agent-002",
+        initial_balance_kwh=5.0
+    )
+    middleware2 = A2EAgentMiddleware(
+        agent_id="test-agent-002",
+        energy_manager=manager2,
+        penalty_config=PenaltyConfig(),
+        risk_factor=1.1
+    )
+    
+    task_high_cost = create_task_request(
+        message="expensive task",
+        estimated_cost_kwh=10.0,
+        offered_reward_kwh=15.0,
+        include_extension=True
+    )
+    
+    result2 = middleware2.handle_a2a_task(task_high_cost, headers)
+    print(f"Insufficient energy test: {result2.decision.value}")
+    print(f"Reason: {result2.reason}")
+    
+    # ROI过低
+    manager3 = EnergyAccountManager(
+        agent_id="test-agent-003",
+        initial_balance_kwh=100.0
+    )
+    middleware3 = A2EAgentMiddleware(
+        agent_id="test-agent-003",
+        energy_manager=manager3,
+        penalty_config=PenaltyConfig(),
+        risk_factor=1.1
+    )
+    
+    task_low_roi = create_task_request(
+        message="low value task",
+        estimated_cost_kwh=10.0,
+        offered_reward_kwh=10.5,  # 仅5%利润
+        include_extension=True
+    )
+    
+    result3 = middleware3.handle_a2a_task(task_low_roi, headers)
+    print(f"Low ROI test: {result3.decision.value}")
+    print(f"Reason: {result3.reason}")
+    
+    print("\n" + "=" * 60)
+    print("All tests completed!")
+    print("=" * 60)

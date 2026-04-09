@@ -542,3 +542,63 @@ https://a2a-protocol.org/latest/specification/
 **扩展 URI**: `https://a2a-protocol.org/extensions/energy-economy/v1`
 **版本**: 1.0
 **日期**: 2026年1月29日
+
+---
+
+## 实验测试
+
+### 服务器实现
+
+`servers/` 目录包含两个可运行的HTTP服务器实现：
+
+- **`servers/standard_a2a_server.py`**: 标准A2A服务器（无能量经济功能）
+- **`servers/a2x_server.py`**: A2X扩展服务器（带ROI过滤和能量账户）
+
+### 测试文件
+
+`tests/` 目录包含以下测试：
+
+- **`tests/test_comparison.py`**: HTTP对比测试，验证A2X相比A2A的性能优势
+- **`tests/test_compatibility.py`**: 兼容性测试，验证A2X与A2A的互操作性
+
+### 运行测试
+
+1. 启动服务器（在两个终端窗口）：
+
+```bash
+# 终端1：启动标准A2A服务器
+python servers/standard_a2a_server.py
+# 服务地址：http://localhost:8001
+
+# 终端2：启动A2X服务器
+python servers/a2x_server.py
+# 服务地址：http://localhost:8002
+```
+
+2. 运行对比测试：
+
+```bash
+# 实验1：基线测试（100任务）
+python tests/test_comparison.py
+
+# 实验2：高负载测试（200任务）
+python tests/test_comparison.py exp2
+
+# 实验3：ROI敏感性测试
+python tests/test_comparison.py exp3
+```
+
+3. 运行兼容性测试：
+
+```bash
+python tests/test_compatibility.py
+```
+
+### 实验结果
+
+| 指标 | A2A | A2X | 差异 |
+|------|-----|-----|------|
+| 能量消耗 | 1000 kWh | 425 kWh | **-57.5%** |
+| 能效比 | 1.275 | 1.765 | **+38.4%** |
+| 任务过滤 | 0 | 50 | 50% |
+| 延迟开销 | - | - | <1% |
