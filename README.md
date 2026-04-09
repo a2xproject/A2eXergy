@@ -286,12 +286,6 @@ MIT License
 
 ---
 
-## Authors
-
-China Academy of Information and Communications Technology (CAICT)  
-Liu Gaofeng, Pan Tong, Yu Wenyan (Corresponding Author)
-
----
 
 ## Repository
 
